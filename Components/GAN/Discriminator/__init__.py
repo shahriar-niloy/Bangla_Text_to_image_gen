@@ -66,25 +66,26 @@ class Discriminator_64(tf.keras.layers.Layer):
         self.unconditional_logits = out_logits()
 
     def build(self, input_shape):
-        self.batch = len(input_shape)                                                     # Set batch dimension at runtime
-        print('DiscBatch: ', self.batch)
+        self.batch = input_shape[0]                                                     # Set batch dimension at runtime
 
     def call(self, x, condition):                   # Here condition is the sentence vector
         encoded_image = self.encode_16(x)                       # input_channel*8 x input_height/16 x input_width/16
+        
         # Join the condition with encoded_image
         cond_batch, cond_feature_dim = condition.get_shape()
         condition = tf.reshape(condition, [cond_batch, 1, 1, cond_feature_dim])
         condition = tf.tile(condition, [1, 4, 4, 1]) 
         encoded_image_condition = tf.concat([encoded_image, condition], axis=-1)          # Concat encoded image with condition in the last dimension, that is the channel dimension
-        print('Encoded Image Condition: ', encoded_image_condition.get_shape())
         encoded_image_condition = self.joint_conv(encoded_image_condition)
-        print('After joinnt conv: ', encoded_image_condition.get_shape())
+
         # Get unconditional logits 
         uncond_logits = self.unconditional_logits(encoded_image)
         uncond_logits = tf.reshape(uncond_logits, [self.batch])
+        
         # Get conditional logits 
         cond_logits = self.conditional_logits(encoded_image_condition)
         cond_logits = tf.reshape(cond_logits, [self.batch])
+        
         # Return both logits 
         return uncond_logits, cond_logits
 
@@ -100,7 +101,7 @@ class Discriminator_128(tf.keras.layers.Layer):
         self.unconditional_logits = out_logits()
 
     def build(self, input_shape): 
-        self.batch = len(input_shape)                                                     # Set batch dimension at runtime 
+        self.batch = input_shape[0]                                                     # Set batch dimension at runtime
 
     def call(self, x, condition):                   # Here condition is the sentence vector
         # Encode the input image
@@ -112,9 +113,8 @@ class Discriminator_128(tf.keras.layers.Layer):
         condition = tf.reshape(condition, [cond_batch, 1, 1, cond_feature_dim])
         condition = tf.tile(condition, [1, 4, 4, 1]) 
         encoded_image_condition = tf.concat([encoded_image, condition], axis=-1)          # Concat encoded image with condition in the last dimension, that is the channel dimension
-        print('Encoded Image Condition128: ', encoded_image_condition.get_shape())
         encoded_image_condition = self.joint_conv(encoded_image_condition)
-        print('After joinnt conv: ', encoded_image_condition.get_shape())
+
         # Get unconditional logits 
         uncond_logits = self.unconditional_logits(encoded_image)
         uncond_logits = tf.reshape(uncond_logits, [self.batch])
@@ -137,7 +137,7 @@ class Discriminator_256(tf.keras.layers.Layer):
         self.unconditional_logits = out_logits()
 
     def build(self, input_shape): 
-        self.batch = len(input_shape)                                                     # Set batch dimension at runtime 
+        self.batch = input_shape[0]                                                     # Set batch dimension at runtime
 
     def call(self, x, condition):                   # Here condition is the sentence vector
         # Encode the input image
@@ -145,20 +145,22 @@ class Discriminator_256(tf.keras.layers.Layer):
         encoded_image = self.encode_32(encoded_image)
         encoded_image = self.encode_64(encoded_image)
         encoded_image = self.encode_64_reduced_channel(encoded_image)
+        
         # Join the condition with encoded_image
         cond_batch, cond_feature_dim = condition.get_shape()
         condition = tf.reshape(condition, [cond_batch, 1, 1, cond_feature_dim])
         condition = tf.tile(condition, [1, 4, 4, 1]) 
         encoded_image_condition = tf.concat([encoded_image, condition], axis=-1)          # Concat encoded image with condition in the last dimension, that is the channel dimension
-        print('Encoded Image Condition256: ', encoded_image_condition.get_shape())
         encoded_image_condition = self.joint_conv(encoded_image_condition)
-        print('After joinnt conv: ', encoded_image_condition.get_shape())
+        
         # Get unconditional logits 
         uncond_logits = self.unconditional_logits(encoded_image)
         uncond_logits = tf.reshape(uncond_logits, [self.batch])
+        
         # Get conditional logits 
         cond_logits = self.conditional_logits(encoded_image_condition)
         cond_logits = tf.reshape(cond_logits, [self.batch])
+        
         # Return both logits 
         return uncond_logits, cond_logits
 
@@ -175,12 +177,14 @@ class Discriminator(tf.keras.Model):
         self.block2 = Discriminator_256(self.channel)
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, )
 
-    def train(self, real_images, fake_images, sentence_vector): 
+    def train(self, generator, real_images, sentence_vector, word_vector): 
         with tf.GradientTape() as discriminator_tape:
             batch_size = np.array(real_images).shape[0]
 
+            generator_features = generator.forward(sentence_vector, word_vector)
+            hidden0, fake_img0, hidden1, fake_img1, hidden2, fake_img2, mean, std = generator_features 
+
             real_image0, real_image1, real_image2 = real_images
-            fake_image0, fake_image1, fake_image2 = fake_images
 
             # Train with real images 
             real_uncond_logits0, real_cond_logits0 = self.block0(real_image0, sentence_vector)
@@ -188,9 +192,9 @@ class Discriminator(tf.keras.Model):
             real_uncond_logits2, real_cond_logits2 = self.block2(real_image2, sentence_vector)
 
             # Train with fake images 
-            fake_uncond_logits0, fake_cond_logits0 = self.block0(fake_image0, sentence_vector)
-            fake_uncond_logits1, fake_cond_logits1 = self.block1(fake_image1, sentence_vector)
-            fake_uncond_logits2, fake_cond_logits2 = self.block2(fake_image2, sentence_vector)
+            fake_uncond_logits0, fake_cond_logits0 = self.block0(fake_img0, sentence_vector)
+            fake_uncond_logits1, fake_cond_logits1 = self.block1(fake_img1, sentence_vector)
+            fake_uncond_logits2, fake_cond_logits2 = self.block2(fake_img2, sentence_vector)
 
             # Train with wrong image caption pair 
             _, wrong_cond_logits0 = self.block0(real_image0, sentence_vector)
@@ -205,8 +209,13 @@ class Discriminator(tf.keras.Model):
             total_loss = loss0 + loss1 + loss2
         
         discriminator_variables = self.block0.trainable_variables + self.block1.trainable_variables + self.block2.trainable_variables
-        discriminator_tape.gradient(total_loss, discriminator_variables)
-        # apply graidients to optimizer
+        discriminator_gradients = discriminator_tape.gradient(total_loss, discriminator_variables)
+
+        # for var, grad in zip(discriminator_variables, discriminator_gradients):
+        #     print(f'{var.name} = {grad}')
+
+        self.optimizer.apply_gradients(zip(discriminator_gradients, discriminator_variables))
+
         return total_loss
 
     def calculate_loss(self, real_logits, fake_logits, cond_real_logits, cond_fake_logits, cond_wrong_logits): 

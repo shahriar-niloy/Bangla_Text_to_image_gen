@@ -5,6 +5,7 @@ import os
 import pickle 
 import time 
 import numpy as np 
+import random
 from PIL import Image 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -55,17 +56,13 @@ class CaptionDataset:
 
     def load(self):
         # load captions from dataset and set it to self.captions
-        # temporarily doing this
-        # self.captions = textDataset
         if os.path.isfile(self.checkpoint):                         # If a caption checkpoint exists, load from the saved file.........................=> Pending
             with open(self.checkpoint, 'rb') as file:
                 x = pickle.load(file)
                 # Then load from the saved file
         else:                                                       # If no such checkpoint exists, save the progress for later use....................=> Pending
             captions = self.read_captions()
-            self.preprocess(captions)
-            print('Captions read from txt: ', self.captions[0], self.captions.shape)
-        pass 
+            self.captions = self.preprocess(captions)
 
     def read_captions(self): 
         all_captions = []
@@ -91,9 +88,10 @@ class CaptionDataset:
 
     def preprocess(self, captions):
         sequence_length = self.textPreprocessor.sequence_length
-        self.captions, self.word_index = self.textPreprocessor.preprocess(captions)
-        self.captions = tf.reshape(self.captions, (-1, self.captions_per_image, sequence_length))
+        preprocessed_captions, self.word_index = self.textPreprocessor.preprocess(captions)
+        reshaped_captions = tf.reshape(preprocessed_captions, (-1, self.captions_per_image, sequence_length))
         self.index_word = self.index_to_word(self.word_index)
+        return reshaped_captions
 
     def index_to_word(self, word_index):
         index_word = { y: x for x, y in word_index.items() }
@@ -122,18 +120,26 @@ class ImageDataset:
         self.bbox_path = config.DATASET['BOUDNDING_BOX_PATH']
         self.image_file_names_path = config.DATASET['ALL_IMAGE_PATH']
         self.filename_bbox = self.load_bbox()
+        self.filename_index = range(0, len(self.filenames))
 
     def load_image(self, filename):
         image = tf.io.read_file(filename)
         image = tf.image.decode_jpeg(image, channels=3, dct_method='INTEGER_ACCURATE')
         return image
 
-    def load_batch(self, batch_start_index, batch_end_index):
+    def load_batch(self, batch_start_index=None, batch_end_index=None, indices=None):
         batch_images = [[], [], []]
-        batch_image_filenames = self.filenames[batch_start_index:batch_end_index]
-        
-        for i in range(batch_start_index, batch_end_index):
-            image_filename = self.filenames[i]
+
+        if indices is not None: 
+            batch_image_filenames = self.filenames[indices]
+        else: 
+            if batch_start_index is None or batch_end_index is None:
+                batch_image_filenames = self.filenames[0:self.batch_size]    
+            else:
+                batch_image_filenames = self.filenames[batch_start_index:batch_end_index]
+
+        for i in range(0, self.batch_size):
+            image_filename = batch_image_filenames[i]
             image_filepath = self.image_directory + "/" + image_filename + ".jpg"
             image = self.load_image(image_filepath)
             image = self.preprocess(image, image_filename)
@@ -141,13 +147,19 @@ class ImageDataset:
                 resized_image = tf.image.resize(image, [self.image_sizes[i], self.image_sizes[i]]) 
                 batch_images[i].append(resized_image)
 
+        for i in range(self.generator_blocks):
+            batch_images[i] = tf.convert_to_tensor(batch_images[i])
+
         return batch_images
 
     def preprocess(self, image, image_filename):
         if self.filename_bbox is not None: 
             bbox = self.filename_bbox[image_filename]
             if bbox is not None:
-                image = tf.image.crop_to_bounding_box(image, bbox[1], bbox[0], bbox[3], bbox[2])
+                try:
+                    image = tf.image.crop_to_bounding_box(image, bbox[1], bbox[0], bbox[3], bbox[2])
+                except:
+                    print("Bounding box crop error: " + image_filename)
         
         image = tf.cast(image, tf.float32) / 255.0
         return image
@@ -185,13 +197,13 @@ class DatasetLoader(tf.keras.utils.Sequence):
         self.imageLoader = ImageDataset(self.filenames)
         self.batch_size = config.DATASET['BATCH_SIZE']
         self.sequence_length = config.DATASET['TEXT']['SEQUENCE_LENGTH']
+        self.dataset_index_list = None
 
     def load(self): 
         self.captionLoader.load()
         self.captions = self.captionLoader.get_captions()
-
-    def shuffle(self):
-        self.captions = tf.random.shuffle(self.captions)
+        self.dataset_index_list = list(range(0, len(self.captions)))
+        random.shuffle(self.dataset_index_list)
 
     def __len__(self):
         return self.captions.shape[0] // self.batch_size
@@ -204,19 +216,22 @@ class DatasetLoader(tf.keras.utils.Sequence):
 
         for i in range(batch_start_index, batch_end_index):
             random_index = tf.random.uniform([], 0, captions_per_image, tf.dtypes.int32)
-            caption = self.captions[i][random_index]
+            caption_index = self.dataset_index_list[i]
+
+            caption = self.captions[caption_index][random_index]
             batch_captions = np.append(batch_captions, caption, axis=0)
 
         batch_captions = tf.reshape(batch_captions, (self.batch_size, self.sequence_length))
-        batch_images = self.imageLoader.load_batch(batch_start_index, batch_end_index)
-        batch_class_ids = tf.convert_to_tensor(self.class_ids[batch_start_index:batch_end_index])
+        batch_indices = self.dataset_index_list[batch_start_index : batch_end_index]
+        batch_images = self.imageLoader.load_batch(indices=batch_indices)
+        batch_class_ids = tf.convert_to_tensor(self.class_ids[batch_indices])           # Class Ids are not being randomized 
         
         # Test = Iterating through the batch to see if we are getting the right caption and picture pair 
-        # for i in range(self.batch_size):        
-        #     print('Current filename: ', self.filenames[index + i])
-        #     print('Current Caption: ', self.captionLoader.show_text_from_sequence(batch_captions[i]))
-        #     print('Current Classes: ', batch_class_ids[i])
-        #     self.imageLoader.show_image(batch_images[i][2])
+        # for j in range(self.batch_size): 
+        #     print('Current filename: ', self.filenames[index + j])
+        #     print('Current Caption: ', self.captionLoader.show_text_from_sequence(batch_captions[j]))
+        #     print('Current Classes: ', batch_class_ids[j])
+        #     self.imageLoader.show_image(batch_images[2][j])
 
         return batch_captions, batch_images, batch_class_ids
 
@@ -227,7 +242,7 @@ class DatasetLoader(tf.keras.utils.Sequence):
             print('Load filenames from: %s (%d)' % (filepath, len(filenames)))
         else:
             filenames = []
-        return filenames
+        return np.array(filenames)
 
     def load_class_id(self, filepath): 
         if os.path.isfile(filepath):
@@ -235,12 +250,17 @@ class DatasetLoader(tf.keras.utils.Sequence):
                 class_id = pickle.load(f, encoding="bytes")
         else:
             class_id = np.arange(total_num)
-        return class_id 
-        
+
+        return np.array(class_id) 
 
     def get_captions(self): 
         return self.captions 
 
+    def shuffle(self):
+        self.dataset_index_list = tf.random.shuffle(self.dataset_index_list)
+
+    def on_epoch_end(self):
+        self.shuffle()
 
 # textPreprocessor = TextPreprocessor(dictionary_size, unknown_token_symbol)
 # captionDataset = CaptionDataset(textPreprocessor)

@@ -2,11 +2,13 @@ import sys
 import os
 import tensorflow as tf 
 import numpy as np 
+from PIL import Image 
 
 sys.path.append(os.getcwd())
 
 from config import config 
 from Components.Attention.Model import Attention
+from Components.ConditionalAugmentation import ConditionalAugmentation
 
 def upSample(x, scale_factor=2):
     _, height, width, _ = x.get_shape().as_list()
@@ -116,7 +118,6 @@ class IntermediateGeneratorBlock(tf.keras.layers.Layer):
         word_context = tf.reshape(word_context, shape=[batch, height, width, channel])
         # hidden_word_context = Concat Operation => [batch, height, weight, common_dim*2]
         hidden_word_context = tf.concat([hidden, word_context], axis=-1)
-        print('hidden_word_context shape: ',hidden_word_context.get_shape())
         # x = self.res1(hidden_word_context)
         x = self.res1(hidden_word_context)
         x = self.res2(x)
@@ -134,20 +135,30 @@ class Generator(tf.keras.Model):
         self.gamma3  = config.DAMSM['SENTENCE_LOSS_CONSTANT']
         self.smooth_lambda = config.SMOOTH['LAMBDA']
         self.learning_rate = config.MODEL['LEARNING_RATE']
+        self.conditionalDimension = config.CONDITIONING_AUGMENTATION['DIMENSION']
+        self.batch_size = config.DATASET['BATCH_SIZE']
+        self.currentGeneratedImageDir = config.LOG['CURRENT_IMAGE']
         self.build_model()
-        pass
 
     def build_model(self):
         self.block0 = InitialGeneratorBlock(self.initial_channel)
         self.block1 = IntermediateGeneratorBlock(self.initial_channel/16)
         self.block2 = IntermediateGeneratorBlock(self.initial_channel/16)
+        self.condAugmentation = ConditionalAugmentation(self.conditionalDimension)
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, beta_1=0.5, beta_2=0.999, epsilon=1e-08)
 
-    def forward(self, noise_condition_vector, word_vector):
+    def forward(self, sentence_vector, word_vector):
+        # Apply conditional augmentation
+        condition_vector, mean, std = self.condAugmentation(sentence_vector)
+        # Concat noise vector with condition code
+        noise_vector = tf.random.normal(shape=[self.batch_size, self.conditionalDimension])
+        noise_condition_vector = tf.concat([condition_vector, noise_vector], axis=-1)
+
         hidden0, img0 = self.block0(noise_condition_vector)
         hidden1, img1 = self.block1(hidden0, word_vector)
         hidden2, img2 = self.block2(hidden1, word_vector)
-        return hidden0, img0, hidden1, img1, hidden2, img2
+
+        return hidden0, img0, hidden1, img1, hidden2, img2, mean, std
 
     def loss(self, uncond_fake_logits, cond_fake_logits):
         batch = uncond_fake_logits.shape[0]
@@ -155,47 +166,56 @@ class Generator(tf.keras.Model):
         conditional_fake_loss = tf.keras.losses.BinaryCrossentropy()(tf.ones([batch]), cond_fake_logits)
         return unconditional_fake_loss + conditional_fake_loss
 
-    def train(self, discriminator, image_encoder, damsm_attention, fake_images, word_vector, global_sentence_vector, condition_vector, class_ids, condAugmentation): 
-        # with tf.GradientTape() as generator_tape:    
-        fake_img0, fake_img1, fake_img2 = fake_images
+    def train(self, discriminator, image_encoder, damsm_attention, word_vector, sentence_vector, class_ids): 
+        with tf.GradientTape() as generator_tape: 
+            # Generator Forward move
+            generator_features = self.forward(sentence_vector, word_vector)
+            hidden0, fake_img0, hidden1, fake_img1, hidden2, fake_img2, mean, std = generator_features   
 
-        # Feed fake images to discriminator and say it is real 
-        fake_uncond_logits0, fake_cond_logits0 = discriminator.block0(fake_img0, condition_vector)
-        fake_uncond_logits1, fake_cond_logits1 = discriminator.block1(fake_img1, condition_vector)
-        fake_uncond_logits2, fake_cond_logits2 = discriminator.block2(fake_img2, condition_vector)
+            # Feed fake images to discriminator and say it is real 
+            fake_uncond_logits0, fake_cond_logits0 = discriminator.block0(fake_img0, sentence_vector)
+            fake_uncond_logits1, fake_cond_logits1 = discriminator.block1(fake_img1, sentence_vector)
+            fake_uncond_logits2, fake_cond_logits2 = discriminator.block2(fake_img2, sentence_vector)
 
-        # Calculate total generator loss 
-        loss0 = self.loss(fake_uncond_logits0, fake_cond_logits0)
-        loss1 = self.loss(fake_uncond_logits1, fake_cond_logits1)
-        loss2 = self.loss(fake_uncond_logits2, fake_cond_logits2)
+            # Calculate total generator loss 
+            loss0 = self.loss(fake_uncond_logits0, fake_cond_logits0)
+            loss1 = self.loss(fake_uncond_logits1, fake_cond_logits1)
+            loss2 = self.loss(fake_uncond_logits2, fake_cond_logits2)
 
-        generator_loss = loss0 + loss1 + loss2
+            generator_loss = loss0 + loss1 + loss2
 
-        # Word loss for the last generator 
-        sub_region_vector, global_image_vector = image_encoder(fake_img2)
-        print('Sub region vector: ', sub_region_vector.shape)
-        word_loss = self.word_loss(damsm_attention, sub_region_vector, word_vector, class_ids)                       # FAKE Class_ids given 
+            # Word loss for the last generator 
+            sub_region_vector, global_image_vector = image_encoder(fake_img2)
 
-        # Sentence loss for the last generator 
-        sentence_loss = self.sentence_loss(global_image_vector, global_sentence_vector, class_ids)
+            word_loss = self.word_loss(damsm_attention, sub_region_vector, word_vector, class_ids)
 
-        total_loss = generator_loss + word_loss + sentence_loss                                                      # NEED: Right implementation of total loss 
+            # Sentence loss for the last generator 
+            sentence_loss = self.sentence_loss(global_image_vector, sentence_vector, class_ids)
 
-        # g_train_variable = self.block0.trainable_variables + self.block1.trainable_variables + self.block2.trainable_variables #+ condAugmentation.trainable_variables
+            # Calculate KL Loss
+            kl_loss = self.condAugmentation.kl_loss(mean, std)
+
+            total_loss = generator_loss + word_loss + sentence_loss + kl_loss                                                      # NEED: Right implementation of total loss 
+
+        g_train_variable = self.block0.trainable_variables + self.block1.trainable_variables + self.block2.trainable_variables + self.condAugmentation.trainable_variables
         
         # # print('G-train var=============================================================>: ', g_train_variable)
         # # print('g block vart============================================================>', self.block0.trainable_variables)
         # # print([var.name for var in generator_tape.watched_variables()])
         # # print(self.block0.trainable_variables)
 
-        # g_gradient = generator_tape.gradient(total_loss, g_train_variable)
+        g_gradient = generator_tape.gradient(total_loss, g_train_variable)
         
         # # print('Gradients: -------------------------------------------------------------->', g_gradient)
 
         # for var, grad in zip(g_train_variable, g_gradient):
         #     print(f'{var.name} = {grad}')
 
-        # # self.optimizer.apply_gradients(zip(g_gradient, g_train_variable))
+        self.optimizer.apply_gradients(zip(g_gradient, g_train_variable))
+        
+        # print(self.currentGeneratedImageDir)
+        # print(os.path.isdir(self.currentGeneratedImageDir))
+        tf.keras.preprocessing.image.save_img(self.currentGeneratedImageDir + "/generated_image.jpg", fake_img2[0])
 
         return total_loss
 
@@ -220,11 +240,11 @@ class Generator(tf.keras.Model):
             word = tf.expand_dims(word, axis=0)                             # So add the batch dimension. Now the batch dimension is 1
             word = tf.tile(word, multiples=[batch_size, 1, 1])              # Now increase the batch dimension 
             
-            print('Image Feature: ', image_feature.shape)
+            # print('Image Feature: ', image_feature.shape)
 
             # Get region context vectors using DAMSM Attention. 
             region_context = damsm_attention(image_feature, word)           # Dimension [bs, ndf, seq_len]
-            print('Region context vector: ', region_context.shape)
+            # print('Region context vector: ', region_context.shape)
 
             # Calculate cosine similarity 
             region_context = tf.transpose(region_context, perm=[0, 2, 1])
@@ -284,11 +304,11 @@ class Generator(tf.keras.Model):
         scores0 = tf.squeeze(scores0, axis=0)
 
         scores0 = tf.where(tf.equal(masks, True), x=tf.constant(-float('inf'), dtype=tf.float32, shape=masks.shape), y=scores0)
-        print('score0======>', scores0)
+        # print('score0======>', scores0)
         scores1 = tf.transpose(scores0, perm=[1, 0])
-        print('label: ', label)
+        # print('label: ', label)
         loss0 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=scores0, labels=label))
-        print('loss0: ', loss0)
+        # print('loss0: ', loss0)
         loss1 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=scores1, labels=label))
 
         loss = (loss0 + loss1) / self.smooth_lambda

@@ -2,10 +2,8 @@ import os
 
 dir_name = os.path.dirname(__file__) + '/..'
 
-print('Dir name: ', dir_name)
-
 DATASET = {
-  'BATCH_SIZE': 5,
+  'BATCH_SIZE': 13,
   'DIR': dir_name + '/Dataset/',
   'BOUDNDING_BOX_PATH': dir_name + '/Dataset/bounding_boxes.txt',
   'ALL_IMAGE_PATH': dir_name + '/Dataset/images.txt',
@@ -49,9 +47,10 @@ DISCRIMINATOR = {
 
 MODEL = {
   'NOISE_DIMENSION': 10,
-  'CHECKPOINT_PATH': dir_name + 'Checkpoint',
+  'CHECKPOINT_PATH': dir_name + '/Checkpoint/model',
   'MAX_NUMBER_OF_CHECKPOINTS': 2,
-  'LEARNING_RATE': 0.05
+  'SAVE_INTERVAL': 5,
+  'LEARNING_RATE': 0.0005
 }
 
 SMOOTH = {
@@ -61,9 +60,17 @@ SMOOTH = {
 DAMSM = {
   'DAMSM_LOSS_CONSTANT': 0.2,
   'SENTENCE_LOSS_CONSTANT': 10.0,
-  'GAMMA1': 4.0
+  'GAMMA1': 4.0,
+  'SAVE_INTERVAL': 5,
+  'LEARNING_RATE': 0.0005,
+  'CHECKPOINT_PATH': dir_name + '/Checkpoint/DAMSM',
+  'MAX_NUMBER_OF_CHECKPOINTS': 2
 }
 
 CONDITIONING_AUGMENTATION = {
   'DIMENSION': 10
+}
+
+LOG = {
+  "CURRENT_IMAGE": dir_name + "/log"
 }

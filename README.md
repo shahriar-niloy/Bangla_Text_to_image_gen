@@ -4,12 +4,17 @@
 
 # Should we preserve the aspect ration of the image? 
 
-# Find a way to introduce shuffle 
+# ------ Before Training -------
+# Check if shuffled data in model.py is (caption and image pair) is correct or not 
+# Fix the loss function 
+# Shuffle Dataset
+# Discriminator / Generator er error ta thik moto implement kora 
+# Model er bibhinno component save kora during trainging and load 
+# Show image every nth step so that we know how we are progressing 
+# log current losses 
+# Caption encoding (Check others code)
+# Train DAMSM Model 
+# Adapt this code for Google colab 
 
-# Tasks Tomorrow 
-# Train the parameters 
-# Save chechkpoints 
-
-
-# Make sure that all layers are in the the following form (self.prop_name) in a trackable object like (tf.keras.model)  
-# otherwise it would not train 
+# ------- Testing --------
+# Implement function for evaluating the model 
